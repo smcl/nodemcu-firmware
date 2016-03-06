@@ -272,6 +272,10 @@ ping_raw_init(struct ping_msg *pingmsg)
 	pingmsg->ping_pcb = raw_new(IP_PROTO_ICMP);
 	LWIP_ASSERT("ping_pcb != NULL", pingmsg->ping_pcb != NULL);
 
+	if (pingmsg->ping_opt->ttl) {
+	  pingmsg->ping_pcb->ttl = pingmsg->ping_opt->ttl;
+	}
+
 	raw_recv(pingmsg->ping_pcb, ping_recv, pingmsg);
 	raw_bind(pingmsg->ping_pcb, IP_ADDR_ANY);
 

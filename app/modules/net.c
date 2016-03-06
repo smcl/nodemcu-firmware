@@ -46,6 +46,11 @@ static int ping_callback_ref;
 static int ping_host_count;
 static ip_addr_t ping_host_ip;
 
+static uint32 traceroute_target_ip;
+static int traceroute_callback_ref;
+static uint8 traceroute_ttl_max;
+static ip_addr_t traceroute_host_ip;
+
 typedef struct lnet_userdata
 {
   struct espconn *pesp_conn;
@@ -1580,16 +1585,15 @@ static int net_ping(lua_State *L)
     if (lua_isnumber(L, 2)) {
 	count = luaL_checkinteger(L, 2);
     }
-
+   
     // retrieve callback arg (optional)
-    if (lua_type(L, 3) == LUA_TFUNCTION || lua_type(L, 3) == LUA_TLIGHTFUNCTION) {     
-      if (ping_callback_ref != LUA_NOREF) 
-	luaL_unref(L, LUA_REGISTRYINDEX, ping_callback_ref);
+    if (ping_callback_ref != LUA_NOREF) 
+      luaL_unref(L, LUA_REGISTRYINDEX, ping_callback_ref);
+    ping_callback_ref = LUA_NOREF;
+       
+    if (lua_type(L, 3) == LUA_TFUNCTION || lua_type(L, 3) == LUA_TLIGHTFUNCTION)
       ping_callback_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-    } else {
-      ping_callback_ref = LUA_NOREF;
-    }
-
+    
     gL = L;   // global L for net module.
 
     // attempt to parse ping target as IP
@@ -1615,11 +1619,123 @@ static int net_ping(lua_State *L)
     return 0;
 }
 
-static int net_traceroute(lua_State *L) {
-  // todo: actually implement this, need to read through some lwip docs first
-    lua_pushnil(L);
+void traceroute_received(void *arg, void *data) {
+    struct ping_option *traceroute_opt = (struct ping_option*)arg;
+    struct ping_resp *traceroute_resp = (struct ping_resp*)data;
+
+    char ipaddrstr[16];
+    ip_addr_t source_ip;
+    
+    source_ip.addr = traceroute_opt->ip;
+    ipaddr_ntoa_r(&source_ip, ipaddrstr, sizeof(ipaddrstr));
+
+    // if we've registered a lua callback function, retrieve
+    // it from registry + call it, otherwise just print the traceroute
+    // response in a similar way to the standard iputils traceroute
+    if (traceroute_callback_ref != LUA_NOREF) {
+      lua_rawgeti(gL, LUA_REGISTRYINDEX, ping_callback_ref);
+      lua_pushinteger(gL, traceroute_resp->bytes);
+      lua_pushstring(gL, ipaddrstr);
+      lua_pushinteger(gL, traceroute_resp->seqno);
+      lua_pushinteger(gL, traceroute_resp->ttl);
+      lua_pushinteger(gL, traceroute_resp->resp_time);
+      lua_call(gL, 5, 0);
+    } else {
+      c_printf("%d %s %d ms\n",
+	       traceroute_resp->ttl,
+	       ipaddrstr,
+	       traceroute_resp->resp_time);
+    }
    
-    return 1;
+    if (source_ip.addr != traceroute_target_ip &&
+	traceroute_opt->ttl < traceroute_ttl_max) {
+      traceroute_opt->ttl++;
+      traceroute_start(traceroute_opt);
+    }    
+}
+
+static void traceroute_by_hostname(const char *name, ip_addr_t *ipaddr, void *arg) {
+    struct ping_option *traceroute_opt = (struct ping_option *)c_zalloc(sizeof(struct ping_option));
+
+    if (ipaddr->addr == IPADDR_NONE) {
+      c_printf("problem resolving hostname\n");
+      return;
+    }
+
+    traceroute_opt->ttl = 1;
+    traceroute_opt->count = ping_host_count;
+    traceroute_opt->ip = ipaddr->addr;
+    traceroute_opt->coarse_time = 0;
+    traceroute_opt->recv_function = &traceroute_received;
+    
+    traceroute_start(traceroute_opt);
+}
+
+/**
+  * net.traceroute()
+  * Description:
+  * 	Bend the existing ping() functionality to behave a little like traceroute
+  * Syntax:
+  *     net.traceroute(address)           -- traceroute with ttl = 255 (i.e. max 255 hops)
+  *     net.traceroute(address, 64)       -- traceroute with ttl = 64
+  *     net.traceroute(address, 32, func) -- traceroute with ttl = 32, run custom callback
+  * Parameters:
+  * 	address: string 
+  * 	ttl: maximum number of hops 
+  * 	callback: lua function to call on receive
+  * Returns:
+  * 	Nothing.
+  *
+  * Example:
+  *     net.traceroute("google.com")                  -- traceroute to google.com
+  *     net.traceroute("google.com", 64)              -- traceroute to google.com, max 64 hops
+  *     net.traceroute("google.com", 32, got_tracert) -- traceroute to google.com, max 32 hops, call got_tracert when receive response
+  */
+static int net_traceroute(lua_State *L) {
+    const char *traceroute_target;
+
+    // retrieve address arg (mandatory)
+    if (lua_isstring(L, 1)) {
+	traceroute_target = luaL_checkstring(L, 1);
+    } else {
+	return luaL_error(L, "no address specified");
+    }
+
+    // retrieve ttl arg (optional)
+    if (lua_isnumber(L, 2)) {
+      traceroute_ttl_max = luaL_checkinteger(L, 2);
+    }
+   
+    // retrieve callback arg (optional)
+    if (traceroute_callback_ref != LUA_NOREF) 
+      luaL_unref(L, LUA_REGISTRYINDEX, traceroute_callback_ref);
+    traceroute_callback_ref = LUA_NOREF;
+       
+    if (lua_type(L, 3) == LUA_TFUNCTION || lua_type(L, 3) == LUA_TLIGHTFUNCTION)
+      traceroute_callback_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    
+    gL = L;   // global L for net module.
+
+    // attempt to parse ping target as IP
+    traceroute_target_ip = ipaddr_addr(traceroute_target);
+
+    if (traceroute_target_ip != IPADDR_NONE) {
+	struct ping_option *traceroute_opt = (struct ping_option *)c_zalloc(sizeof(struct ping_option));
+
+	traceroute_opt->ttl = 1;
+	traceroute_opt->count = 1;
+	traceroute_opt->ip = traceroute_target_ip;
+	traceroute_opt->coarse_time = 0;
+	traceroute_opt->recv_function = &traceroute_received;
+
+	ping_start(traceroute_opt);
+    } else {
+      	struct espconn *traceroute_dns_lookup;
+	espconn_create(traceroute_dns_lookup);
+	espconn_gethostbyname(traceroute_dns_lookup, traceroute_target, &traceroute_host_ip, traceroute_by_hostname);
+    }
+
+    return 0;
 }
 
 

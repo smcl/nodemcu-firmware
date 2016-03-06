@@ -47,7 +47,9 @@
 typedef void (* ping_recv_function)(void* arg, void *pdata);
 typedef void (* ping_sent_function)(void* arg, void *pdata);
 
+
 struct ping_option{
+  uint8 ttl;
 	uint32 count;
 	uint32 ip;
 	uint32 coarse_time;
