@@ -164,7 +164,8 @@ ping_recv(void *arg, struct raw_pcb *pcb, struct pbuf *p, ip_addr_t *addr)
 				  pingresp.resp_time = delay;
 				  pingresp.seqno = ntohs(iecho->seqno);
 				  pingresp.ping_err = 0;
-				  pingmsg->ping_opt->recv_function(pingmsg->ping_opt,(void*) &pingresp);
+				  pingresp.ttl = iphdr->_ttl;
+				  pingmsg->ping_opt->recv_function(pingmsg, (void*) &pingresp);
 			  }
 		  }
 		  seqno = iecho->seqno;
@@ -240,7 +241,7 @@ ping_coarse_tmr(void *arg)
 	} else {
 		uint32 delay = system_relative_time(pingmsg->ping_start);
 		delay /= PING_COARSE;
-//		ping_seq_num = 0;
+		ping_seq_num = 0;
 		if (ping_opt->sent_function == NULL){
 			os_printf("ping %d, timeout %d, total payload %d bytes, %d ms\n",
 					pingmsg->max_count, pingmsg->timeout_count, PING_DATA_SIZE*(pingmsg->max_count - pingmsg->timeout_count),delay);
